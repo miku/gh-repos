@@ -16,6 +16,8 @@ You can list repos and sync them.
 $ gh-repos list
 ```
 
+![](static/gh-repos-list-Post45-Data-Collective.png)
+
 To sync:
 
 ```shell
