@@ -58,7 +58,7 @@ func setupTestServer(t *testing.T, repos []Repo) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]string{"login": "testuser"})
 	})
 
-	mux.HandleFunc("/users/testuser/repos", func(w http.ResponseWriter, r *http.Request) {
+	repoHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -69,7 +69,9 @@ func setupTestServer(t *testing.T, repos []Repo) *httptest.Server {
 		} else {
 			json.NewEncoder(w).Encode([]Repo{})
 		}
-	})
+	}
+	mux.HandleFunc("/users/testuser/repos", repoHandler)
+	mux.HandleFunc("/user/repos", repoHandler)
 
 	return httptest.NewServer(mux)
 }
@@ -125,7 +127,7 @@ func TestGitHubClientListRepos(t *testing.T) {
 		BaseURL:    server.URL,
 	}
 
-	repos, err := client.ListRepos(context.Background(), "testuser")
+	repos, err := client.ListRepos(context.Background(), "testuser", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +220,7 @@ func TestGetReposUsesCache(t *testing.T) {
 	}
 
 	// Without force, should get cached data
-	repos, err := getRepos(context.Background(), client, testUser, false)
+	repos, err := getRepos(context.Background(), client, testUser, false, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -251,7 +253,7 @@ func TestGetReposForceBypassesCache(t *testing.T) {
 	}
 
 	// With force, should get server data
-	repos, err := getRepos(context.Background(), client, testUser, true)
+	repos, err := getRepos(context.Background(), client, testUser, false, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -262,12 +264,15 @@ func TestGetReposForceBypassesCache(t *testing.T) {
 
 func TestResolveUserExplicit(t *testing.T) {
 	client := NewGitHubClient("unused")
-	user, err := resolveUser(context.Background(), client, "explicit-user")
+	user, owned, err := resolveUser(context.Background(), client, "explicit-user")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if user != "explicit-user" {
 		t.Errorf("got %q, want %q", user, "explicit-user")
+	}
+	if owned {
+		t.Error("expected owned=false for explicit user")
 	}
 }
 
@@ -281,12 +286,15 @@ func TestResolveUserFromAPI(t *testing.T) {
 		BaseURL:    server.URL,
 	}
 
-	user, err := resolveUser(context.Background(), client, "")
+	user, owned, err := resolveUser(context.Background(), client, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if user != "testuser" {
 		t.Errorf("got %q, want %q", user, "testuser")
+	}
+	if !owned {
+		t.Error("expected owned=true for authenticated user")
 	}
 }
 

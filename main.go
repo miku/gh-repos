@@ -104,11 +104,18 @@ func (c *GitHubClient) AuthenticatedUser(ctx context.Context) (string, error) {
 }
 
 // ListRepos fetches all repositories for a user, handling pagination.
-func (c *GitHubClient) ListRepos(ctx context.Context, user string) ([]Repo, error) {
+// When owned is true, it uses the authenticated /user/repos endpoint
+// which includes private repositories.
+func (c *GitHubClient) ListRepos(ctx context.Context, user string, owned bool) ([]Repo, error) {
 	var allRepos []Repo
 	page := 1
 	for {
-		url := fmt.Sprintf("%s/users/%s/repos?per_page=100&page=%d&sort=pushed", c.BaseURL, user, page)
+		var url string
+		if owned {
+			url = fmt.Sprintf("%s/user/repos?per_page=100&page=%d&sort=pushed&affiliation=owner", c.BaseURL, page)
+		} else {
+			url = fmt.Sprintf("%s/users/%s/repos?per_page=100&page=%d&sort=pushed", c.BaseURL, user, page)
+		}
 		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, err
@@ -188,13 +195,14 @@ func saveCache(user string, repos []Repo) error {
 }
 
 // getRepos returns repos for a user, using cache unless force is set.
-func getRepos(ctx context.Context, client *GitHubClient, user string, force bool) ([]Repo, error) {
+// When owned is true, the authenticated /user/repos endpoint is used.
+func getRepos(ctx context.Context, client *GitHubClient, user string, owned, force bool) ([]Repo, error) {
 	if !force {
 		if entry, err := loadCache(user, defaultCacheTTL); err == nil {
 			return entry.Repos, nil
 		}
 	}
-	repos, err := client.ListRepos(ctx, user)
+	repos, err := client.ListRepos(ctx, user, owned)
 	if err != nil {
 		return nil, err
 	}
@@ -205,11 +213,13 @@ func getRepos(ctx context.Context, client *GitHubClient, user string, force bool
 }
 
 // resolveUser determines the GitHub username: explicit flag, or authenticated user.
-func resolveUser(ctx context.Context, client *GitHubClient, explicit string) (string, error) {
+// The second return value indicates whether this is the authenticated user (owned).
+func resolveUser(ctx context.Context, client *GitHubClient, explicit string) (string, bool, error) {
 	if explicit != "" {
-		return explicit, nil
+		return explicit, false, nil
 	}
-	return client.AuthenticatedUser(ctx)
+	user, err := client.AuthenticatedUser(ctx)
+	return user, err == nil, err
 }
 
 // isDirty checks if a git repo has uncommitted changes.
@@ -308,12 +318,12 @@ func cmdList(args []string) error {
 	ctx := context.Background()
 	client := NewGitHubClient(token)
 
-	username, err := resolveUser(ctx, client, *user)
+	username, owned, err := resolveUser(ctx, client, *user)
 	if err != nil {
 		return fmt.Errorf("failed to resolve user: %w", err)
 	}
 
-	repos, err := getRepos(ctx, client, username, *force)
+	repos, err := getRepos(ctx, client, username, owned, *force)
 	if err != nil {
 		return fmt.Errorf("failed to list repos: %w", err)
 	}
@@ -339,12 +349,12 @@ func cmdSync(args []string) error {
 	ctx := context.Background()
 	client := NewGitHubClient(token)
 
-	username, err := resolveUser(ctx, client, *user)
+	username, owned, err := resolveUser(ctx, client, *user)
 	if err != nil {
 		return fmt.Errorf("failed to resolve user: %w", err)
 	}
 
-	repos, err := getRepos(ctx, client, username, *force)
+	repos, err := getRepos(ctx, client, username, owned, *force)
 	if err != nil {
 		return fmt.Errorf("failed to list repos: %w", err)
 	}
