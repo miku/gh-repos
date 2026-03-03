@@ -23,7 +23,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/tabwriter"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -234,6 +237,46 @@ func gitPull(ctx context.Context, dir string) error {
 	return cmd.Run()
 }
 
+// termWidth returns the width of the terminal, defaulting to 80.
+func termWidth() int {
+	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
+// writeRepoList writes repos as a tab-aligned table, truncating descriptions
+// so lines do not exceed width columns.
+func writeRepoList(w io.Writer, repos []Repo, width int) {
+	if len(repos) == 0 {
+		return
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	maxName := 0
+	for _, r := range repos {
+		if len(r.Name) > maxName {
+			maxName = len(r.Name)
+		}
+	}
+	// 2 spaces of padding between name and description columns
+	maxDesc := width - maxName - 2
+	for _, r := range repos {
+		desc := r.Description
+		if maxDesc > 3 && len(desc) > maxDesc {
+			desc = desc[:maxDesc-3] + "..."
+		} else if maxDesc <= 3 {
+			desc = ""
+		}
+		if desc != "" {
+			fmt.Fprintf(tw, "%s\t%s\n", r.Name, desc)
+		} else {
+			fmt.Fprintln(tw, r.Name)
+		}
+	}
+	tw.Flush()
+}
+
 // matchPattern checks if name matches a glob-like pattern (supports * wildcards).
 func matchPattern(pattern, name string) bool {
 	re := regexp.QuoteMeta(pattern)
@@ -267,13 +310,7 @@ func cmdList(args []string) error {
 		return fmt.Errorf("failed to list repos: %w", err)
 	}
 
-	for _, r := range repos {
-		if r.Description != "" {
-			fmt.Printf("%s\t%s\n", r.Name, r.Description)
-		} else {
-			fmt.Println(r.Name)
-		}
-	}
+	writeRepoList(os.Stdout, repos, termWidth())
 	return nil
 }
 

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -285,5 +287,57 @@ func TestResolveUserFromAPI(t *testing.T) {
 	}
 	if user != "testuser" {
 		t.Errorf("got %q, want %q", user, "testuser")
+	}
+}
+
+func TestWriteRepoList(t *testing.T) {
+	repos := []Repo{
+		{Name: "short", Description: "A short description"},
+		{Name: "longer-name", Description: "Another description"},
+		{Name: "no-desc"},
+	}
+
+	var buf bytes.Buffer
+	writeRepoList(&buf, repos, 80)
+	out := buf.String()
+
+	// tabwriter should align columns: longest name is "longer-name" (11 chars) + 2 padding
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3", len(lines))
+	}
+	// All lines with descriptions should have the same column alignment
+	if !strings.Contains(lines[0], "short") || !strings.Contains(lines[0], "A short description") {
+		t.Errorf("unexpected first line: %q", lines[0])
+	}
+	if !strings.Contains(lines[2], "no-desc") {
+		t.Errorf("unexpected third line: %q", lines[2])
+	}
+}
+
+func TestWriteRepoListTruncation(t *testing.T) {
+	repos := []Repo{
+		{Name: "myrepo", Description: "This is a very long description that should be truncated"},
+	}
+
+	var buf bytes.Buffer
+	// width=30: name "myrepo" (6) + 2 padding = 8, so maxDesc = 22
+	writeRepoList(&buf, repos, 30)
+	out := buf.String()
+
+	line := strings.TrimSpace(out)
+	if len(line) > 30 {
+		t.Errorf("line exceeds width 30: len=%d %q", len(line), line)
+	}
+	if !strings.HasSuffix(line, "...") {
+		t.Errorf("expected truncated description to end with '...': %q", line)
+	}
+}
+
+func TestWriteRepoListEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	writeRepoList(&buf, nil, 80)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for empty list, got %q", buf.String())
 	}
 }
