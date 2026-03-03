@@ -1,10 +1,10 @@
 # gh-repos
 
-Clone or fetch all repos. An afternoon hack.
+Clone or fetch all repos; an afternoon hack.
 
 ## Install
 
-```
+```shell
 $ go install github.com/miku/gh-repos@latest
 ```
 
@@ -12,13 +12,19 @@ $ go install github.com/miku/gh-repos@latest
 
 You can list repos and sync them.
 
-```
+```shell
 $ gh-repos list
+```
+
+To sync:
+
+```shell
+$ gh-repos sync
 ```
 
 ## Usage
 
-```
+```shell
 $ gh-repos -h
 gh-repos - fetch and manage GitHub repositories
 
