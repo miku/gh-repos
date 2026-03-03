@@ -2,7 +2,8 @@
 
 Clone or fetch all repos; an afternoon hack. Uses a GitHub
 [token](https://github.com/settings/tokens) stored in `GITHUB_TOKEN`
-environment variable.
+environment variable. Wanted to have this after I found a script to [clone all
+gists](https://gist.github.com/miku/4502324062dc5437f98f965046920c04).
 
 ## Install
 
