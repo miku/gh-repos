@@ -1,6 +1,8 @@
 # gh-repos
 
-Clone or fetch all repos; an afternoon hack.
+Clone or fetch all repos; an afternoon hack. Uses a GitHub
+[token](https://github.com/settings/tokens) stored in `GITHUB_TOKEN`
+environment variable.
 
 ## Install
 
@@ -47,3 +49,12 @@ Flags:
   -d string  Target directory for cloned repos (sync only, default: ".")
   -p string  Filter repos by name pattern with * wildcards (sync only)
 ```
+
+## Prior Art
+
+* [How to clone all repos at once from
+  GitHub?](https://stackoverflow.com/questions/19576742/how-to-clone-all-repos-at-once-from-github),
+asked 12y 4m ago, 262k views
+* [asottile/all-repos](https://github.com/asottile/all-repos)
+* [rhysd/github-clone-all](https://github.com/rhysd/github-clone-all)
+* ...
