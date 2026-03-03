@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -238,12 +239,18 @@ func gitPull(ctx context.Context, dir string) error {
 }
 
 // termWidth returns the width of the terminal, defaulting to 80.
+// When stdout is piped (e.g. into less), it falls back to stderr or
+// the COLUMNS environment variable to preserve the original width.
 func termWidth() int {
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil || w <= 0 {
-		return 80
+	for _, f := range []*os.File{os.Stdout, os.Stderr} {
+		if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+			return w
+		}
 	}
-	return w
+	if w, err := strconv.Atoi(os.Getenv("COLUMNS")); err == nil && w > 0 {
+		return w
+	}
+	return 80
 }
 
 // writeRepoList writes repos as a tab-aligned table, truncating descriptions
@@ -259,8 +266,9 @@ func writeRepoList(w io.Writer, repos []Repo, width int) {
 			maxName = len(r.Name)
 		}
 	}
-	// Reserve space for icon column (icon + padding) and name-desc padding
-	maxDesc := width - maxName - 4 // icon col ~2 + 2 padding between name and desc
+	// Reserve space for icon column (icon + padding), name-desc padding,
+	// and a small right margin to avoid wrapping in tmux/terminals.
+	maxDesc := width - maxName - 6 // icon ~2 + padding 2 + right margin 2
 	for _, r := range repos {
 		icon := ""
 		if r.Fork {
