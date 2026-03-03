@@ -283,6 +283,8 @@ func writeRepoList(w io.Writer, repos []Repo, width int) {
 		icon := ""
 		if r.Fork {
 			icon = "⑂"
+		} else if r.Private {
+			icon = "◌"
 		}
 		desc := r.Description
 		if maxDesc > 3 && len(desc) > maxDesc {
