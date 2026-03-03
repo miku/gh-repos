@@ -1,0 +1,289 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestMatchPattern(t *testing.T) {
+	tests := []struct {
+		pattern string
+		name    string
+		want    bool
+	}{
+		{"*", "anything", true},
+		{"foo", "foo", true},
+		{"foo", "bar", false},
+		{"go-*", "go-solr", true},
+		{"go-*", "python-solr", false},
+		{"*-tools", "my-tools", true},
+		{"*-tools", "my-utils", false},
+		{"*data*", "bigdata-tool", true},
+		{"exact-match", "exact-match", true},
+		{"exact-match", "not-exact-match", false},
+	}
+
+	for _, tt := range tests {
+		got := matchPattern(tt.pattern, tt.name)
+		if got != tt.want {
+			t.Errorf("matchPattern(%q, %q) = %v, want %v", tt.pattern, tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestIsDirty(t *testing.T) {
+	// A non-existent directory should be considered dirty
+	if !isDirty("/nonexistent/path") {
+		t.Error("expected non-existent path to be dirty")
+	}
+}
+
+func setupTestServer(t *testing.T, repos []Repo) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"login": "testuser"})
+	})
+
+	mux.HandleFunc("/users/testuser/repos", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		if page == "" || page == "1" {
+			json.NewEncoder(w).Encode(repos)
+		} else {
+			json.NewEncoder(w).Encode([]Repo{})
+		}
+	})
+
+	return httptest.NewServer(mux)
+}
+
+func TestGitHubClientAuthenticatedUser(t *testing.T) {
+	server := setupTestServer(t, nil)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	user, err := client.AuthenticatedUser(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != "testuser" {
+		t.Errorf("got user %q, want %q", user, "testuser")
+	}
+}
+
+func TestGitHubClientAuthenticatedUserUnauthorized(t *testing.T) {
+	server := setupTestServer(t, nil)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "bad-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	_, err := client.AuthenticatedUser(context.Background())
+	if err == nil {
+		t.Fatal("expected error for bad token")
+	}
+}
+
+func TestGitHubClientListRepos(t *testing.T) {
+	testRepos := []Repo{
+		{Name: "repo-a", FullName: "testuser/repo-a", Description: "First repo", CloneURL: "https://github.com/testuser/repo-a.git"},
+		{Name: "repo-b", FullName: "testuser/repo-b", Description: "", CloneURL: "https://github.com/testuser/repo-b.git"},
+		{Name: "go-tool", FullName: "testuser/go-tool", Description: "A Go tool", CloneURL: "https://github.com/testuser/go-tool.git"},
+	}
+
+	server := setupTestServer(t, testRepos)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	repos, err := client.ListRepos(context.Background(), "testuser")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 3 {
+		t.Fatalf("got %d repos, want 3", len(repos))
+	}
+	if repos[0].Name != "repo-a" {
+		t.Errorf("first repo name = %q, want %q", repos[0].Name, "repo-a")
+	}
+	if repos[2].Description != "A Go tool" {
+		t.Errorf("third repo description = %q, want %q", repos[2].Description, "A Go tool")
+	}
+}
+
+func TestCacheRoundTrip(t *testing.T) {
+	// Use a temp dir for cache
+	tmpDir := t.TempDir()
+	origCacheDir := cacheDir
+	// We need to override cache dir for testing; let's test via saveCache/loadCache with a known user
+	// Since cacheDir is a function, we'll just test the file directly.
+
+	testUser := "cache-test-user-" + filepath.Base(tmpDir)
+	repos := []Repo{
+		{Name: "cached-repo", Description: "A cached repo"},
+	}
+
+	// Override cache dir by setting XDG_CACHE_HOME
+	os.Setenv("XDG_CACHE_HOME", tmpDir)
+	defer os.Unsetenv("XDG_CACHE_HOME")
+	_ = origCacheDir // just to avoid unused variable if cacheDir is a func
+
+	err := saveCache(testUser, repos)
+	if err != nil {
+		t.Fatalf("saveCache failed: %v", err)
+	}
+
+	entry, err := loadCache(testUser, 1*time.Hour)
+	if err != nil {
+		t.Fatalf("loadCache failed: %v", err)
+	}
+	if len(entry.Repos) != 1 {
+		t.Fatalf("got %d cached repos, want 1", len(entry.Repos))
+	}
+	if entry.Repos[0].Name != "cached-repo" {
+		t.Errorf("cached repo name = %q, want %q", entry.Repos[0].Name, "cached-repo")
+	}
+}
+
+func TestCacheExpired(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv("XDG_CACHE_HOME", tmpDir)
+	defer os.Unsetenv("XDG_CACHE_HOME")
+
+	testUser := "expired-test-user"
+	repos := []Repo{{Name: "old-repo"}}
+
+	err := saveCache(testUser, repos)
+	if err != nil {
+		t.Fatalf("saveCache failed: %v", err)
+	}
+
+	// Load with zero TTL should fail
+	_, err = loadCache(testUser, 0)
+	if err == nil {
+		t.Error("expected cache to be expired with 0 TTL")
+	}
+}
+
+func TestGetReposUsesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv("XDG_CACHE_HOME", tmpDir)
+	defer os.Unsetenv("XDG_CACHE_HOME")
+
+	// Save to cache first
+	testUser := "cached-user"
+	cachedRepos := []Repo{{Name: "from-cache", Description: "cached"}}
+	if err := saveCache(testUser, cachedRepos); err != nil {
+		t.Fatalf("saveCache failed: %v", err)
+	}
+
+	// Server that would return different repos
+	serverRepos := []Repo{{Name: "from-server", Description: "fresh"}}
+	server := setupTestServer(t, serverRepos)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	// Without force, should get cached data
+	repos, err := getRepos(context.Background(), client, testUser, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != "from-cache" {
+		t.Errorf("expected cached repo, got %v", repos)
+	}
+}
+
+func TestGetReposForceBypassesCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	os.Setenv("XDG_CACHE_HOME", tmpDir)
+	defer os.Unsetenv("XDG_CACHE_HOME")
+
+	// Save to cache first
+	testUser := "testuser"
+	cachedRepos := []Repo{{Name: "from-cache", Description: "cached"}}
+	if err := saveCache(testUser, cachedRepos); err != nil {
+		t.Fatalf("saveCache failed: %v", err)
+	}
+
+	// Server returns different repos
+	serverRepos := []Repo{{Name: "from-server", Description: "fresh"}}
+	server := setupTestServer(t, serverRepos)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	// With force, should get server data
+	repos, err := getRepos(context.Background(), client, testUser, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 1 || repos[0].Name != "from-server" {
+		t.Errorf("expected server repo, got %v", repos)
+	}
+}
+
+func TestResolveUserExplicit(t *testing.T) {
+	client := NewGitHubClient("unused")
+	user, err := resolveUser(context.Background(), client, "explicit-user")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != "explicit-user" {
+		t.Errorf("got %q, want %q", user, "explicit-user")
+	}
+}
+
+func TestResolveUserFromAPI(t *testing.T) {
+	server := setupTestServer(t, nil)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	user, err := resolveUser(context.Background(), client, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != "testuser" {
+		t.Errorf("got %q, want %q", user, "testuser")
+	}
+}

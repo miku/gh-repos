@@ -1,0 +1,401 @@
+// gh-repos fetches and manages GitHub repositories for a user.
+//
+// Usage:
+//
+//	gh-repos list [-u user] [-f]          List repos by name and description
+//	gh-repos sync [-u user] [-d dir] [-f] [-p pattern] Clone or pull repos
+//
+// Environment:
+//
+//	GITHUB_TOKEN  GitHub personal access token (required)
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+)
+
+const (
+	defaultCacheTTL = 1 * time.Hour
+	cacheFileName   = "gh-repos-cache.json"
+	githubAPIBase   = "https://api.github.com"
+)
+
+// Repo represents a GitHub repository.
+type Repo struct {
+	Name        string    `json:"name"`
+	FullName    string    `json:"full_name"`
+	Description string    `json:"description"`
+	CloneURL    string    `json:"clone_url"`
+	SSHURL      string    `json:"ssh_url"`
+	HTMLURL     string    `json:"html_url"`
+	Private     bool      `json:"private"`
+	Fork        bool      `json:"fork"`
+	Archived    bool      `json:"archived"`
+	PushedAt    time.Time `json:"pushed_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// CacheEntry stores cached repo data with a timestamp.
+type CacheEntry struct {
+	FetchedAt time.Time `json:"fetched_at"`
+	User      string    `json:"user"`
+	Repos     []Repo    `json:"repos"`
+}
+
+// GitHubClient handles communication with the GitHub API.
+type GitHubClient struct {
+	Token      string
+	HTTPClient *http.Client
+	BaseURL    string
+}
+
+// NewGitHubClient creates a new GitHub API client.
+func NewGitHubClient(token string) *GitHubClient {
+	return &GitHubClient{
+		Token:      token,
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		BaseURL:    githubAPIBase,
+	}
+}
+
+// AuthenticatedUser returns the login of the authenticated user.
+func (c *GitHubClient) AuthenticatedUser(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/user", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("github api error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var user struct {
+		Login string `json:"login"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return "", err
+	}
+	return user.Login, nil
+}
+
+// ListRepos fetches all repositories for a user, handling pagination.
+func (c *GitHubClient) ListRepos(ctx context.Context, user string) ([]Repo, error) {
+	var allRepos []Repo
+	page := 1
+	for {
+		url := fmt.Sprintf("%s/users/%s/repos?per_page=100&page=%d&sort=pushed", c.BaseURL, user, page)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("github api error: %d %s", resp.StatusCode, string(body))
+		}
+
+		var repos []Repo
+		if err := json.NewDecoder(resp.Body).Decode(&repos); err != nil {
+			return nil, err
+		}
+		if len(repos) == 0 {
+			break
+		}
+		allRepos = append(allRepos, repos...)
+		page++
+	}
+	return allRepos, nil
+}
+
+// cacheDir returns the directory used for caching.
+func cacheDir() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "gh-repos")
+}
+
+// cachePath returns the full path to the cache file for a user.
+func cachePath(user string) string {
+	return filepath.Join(cacheDir(), user+"-"+cacheFileName)
+}
+
+// loadCache loads cached repos for a user if the cache is still valid.
+func loadCache(user string, ttl time.Duration) (*CacheEntry, error) {
+	data, err := os.ReadFile(cachePath(user))
+	if err != nil {
+		return nil, err
+	}
+	var entry CacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		return nil, err
+	}
+	if time.Since(entry.FetchedAt) > ttl {
+		return nil, fmt.Errorf("cache expired")
+	}
+	return &entry, nil
+}
+
+// saveCache writes repo data to the cache file.
+func saveCache(user string, repos []Repo) error {
+	if err := os.MkdirAll(cacheDir(), 0o755); err != nil {
+		return err
+	}
+	entry := CacheEntry{
+		FetchedAt: time.Now(),
+		User:      user,
+		Repos:     repos,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(cachePath(user), data, 0o644)
+}
+
+// getRepos returns repos for a user, using cache unless force is set.
+func getRepos(ctx context.Context, client *GitHubClient, user string, force bool) ([]Repo, error) {
+	if !force {
+		if entry, err := loadCache(user, defaultCacheTTL); err == nil {
+			return entry.Repos, nil
+		}
+	}
+	repos, err := client.ListRepos(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveCache(user, repos); err != nil {
+		log.Printf("warning: failed to save cache: %v", err)
+	}
+	return repos, nil
+}
+
+// resolveUser determines the GitHub username: explicit flag, or authenticated user.
+func resolveUser(ctx context.Context, client *GitHubClient, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	return client.AuthenticatedUser(ctx)
+}
+
+// isDirty checks if a git repo has uncommitted changes.
+func isDirty(dir string) bool {
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	out, err := cmd.Output()
+	if err != nil {
+		return true // assume dirty on error
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// gitClone clones a repo into the target directory.
+func gitClone(ctx context.Context, cloneURL, targetDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, targetDir)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// gitPull runs git pull in the given directory.
+func gitPull(ctx context.Context, dir string) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "pull", "--ff-only")
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// matchPattern checks if name matches a glob-like pattern (supports * wildcards).
+func matchPattern(pattern, name string) bool {
+	re := regexp.QuoteMeta(pattern)
+	re = strings.ReplaceAll(re, `\*`, `.*`)
+	matched, _ := regexp.MatchString("^"+re+"$", name)
+	return matched
+}
+
+// cmdList implements the "list" subcommand.
+func cmdList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	user := fs.String("u", "", "GitHub username (default: authenticated user)")
+	force := fs.Bool("f", false, "Force fresh API request, ignoring cache")
+	fs.Parse(args)
+
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	}
+
+	ctx := context.Background()
+	client := NewGitHubClient(token)
+
+	username, err := resolveUser(ctx, client, *user)
+	if err != nil {
+		return fmt.Errorf("failed to resolve user: %w", err)
+	}
+
+	repos, err := getRepos(ctx, client, username, *force)
+	if err != nil {
+		return fmt.Errorf("failed to list repos: %w", err)
+	}
+
+	for _, r := range repos {
+		if r.Description != "" {
+			fmt.Printf("%s\t%s\n", r.Name, r.Description)
+		} else {
+			fmt.Println(r.Name)
+		}
+	}
+	return nil
+}
+
+// cmdSync implements the "sync" subcommand.
+func cmdSync(args []string) error {
+	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+	user := fs.String("u", "", "GitHub username (default: authenticated user)")
+	dir := fs.String("d", ".", "Target directory for cloned repos")
+	force := fs.Bool("f", false, "Force fresh API request, ignoring cache")
+	pattern := fs.String("p", "", "Filter repos by name pattern (glob with * wildcards)")
+	fs.Parse(args)
+
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+	}
+
+	ctx := context.Background()
+	client := NewGitHubClient(token)
+
+	username, err := resolveUser(ctx, client, *user)
+	if err != nil {
+		return fmt.Errorf("failed to resolve user: %w", err)
+	}
+
+	repos, err := getRepos(ctx, client, username, *force)
+	if err != nil {
+		return fmt.Errorf("failed to list repos: %w", err)
+	}
+
+	if err := os.MkdirAll(*dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create target directory: %w", err)
+	}
+
+	var (
+		cloned  int
+		pulled  int
+		skipped int
+		errors  int
+	)
+
+	for _, r := range repos {
+		if *pattern != "" && !matchPattern(*pattern, r.Name) {
+			continue
+		}
+
+		repoDir := filepath.Join(*dir, r.Name)
+		if info, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil && info.IsDir() {
+			// Repo exists, try to pull
+			if isDirty(repoDir) {
+				fmt.Fprintf(os.Stderr, "skipping %s: working directory is dirty\n", r.Name)
+				skipped++
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "pulling %s ...\n", r.Name)
+			if err := gitPull(ctx, repoDir); err != nil {
+				fmt.Fprintf(os.Stderr, "error pulling %s: %v\n", r.Name, err)
+				errors++
+				continue
+			}
+			pulled++
+		} else {
+			// Clone
+			fmt.Fprintf(os.Stderr, "cloning %s ...\n", r.Name)
+			if err := gitClone(ctx, r.CloneURL, repoDir); err != nil {
+				fmt.Fprintf(os.Stderr, "error cloning %s: %v\n", r.Name, err)
+				errors++
+				continue
+			}
+			cloned++
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "\ndone: %d cloned, %d pulled, %d skipped (dirty), %d errors\n",
+		cloned, pulled, skipped, errors)
+	return nil
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `gh-repos - fetch and manage GitHub repositories
+
+Usage:
+  gh-repos list [-u user] [-f]                List repos by name and description
+  gh-repos sync [-u user] [-d dir] [-f] [-p pattern]  Clone or pull repos
+
+Environment:
+  GITHUB_TOKEN  GitHub personal access token (required)
+
+Subcommands:
+  list    List all repositories for a user
+  sync    Clone new repos and pull existing ones
+
+Flags:
+  -u string  GitHub username (default: authenticated user)
+  -f         Force fresh API request, ignoring cache
+  -d string  Target directory for cloned repos (sync only, default: ".")
+  -p string  Filter repos by name pattern with * wildcards (sync only)
+`)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(1)
+	}
+
+	var err error
+	switch os.Args[1] {
+	case "list":
+		err = cmdList(os.Args[2:])
+	case "sync":
+		err = cmdSync(os.Args[2:])
+	case "-h", "--help", "help":
+		usage()
+		return
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", os.Args[1])
+		usage()
+		os.Exit(1)
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+}
