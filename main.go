@@ -47,6 +47,7 @@ type Repo struct {
 	Private     bool      `json:"private"`
 	Fork        bool      `json:"fork"`
 	Archived    bool      `json:"archived"`
+	Stars       int       `json:"stargazers_count"`
 	PushedAt    time.Time `json:"pushed_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -276,9 +277,19 @@ func writeRepoList(w io.Writer, repos []Repo, width int) {
 			maxName = len(r.Name)
 		}
 	}
-	// Reserve space for icon column (icon + padding), name-desc padding,
-	// and a small right margin to avoid wrapping in tmux/terminals.
-	maxDesc := width - maxName - 6 // icon ~2 + padding 2 + right margin 2
+	// Find max star string width for budget calculation
+	maxStars := 0
+	for _, r := range repos {
+		if s := len(fmt.Sprintf("%d", r.Stars)); r.Stars > 0 && s > maxStars {
+			maxStars = s
+		}
+	}
+	starsCol := 0
+	if maxStars > 0 {
+		starsCol = maxStars + 4 // "(nnn)" + padding
+	}
+	// Reserve space for icon, stars, name-desc padding, and right margin.
+	maxDesc := width - maxName - starsCol - 6
 	for _, r := range repos {
 		icon := ""
 		if r.Fork {
@@ -286,13 +297,17 @@ func writeRepoList(w io.Writer, repos []Repo, width int) {
 		} else if r.Private {
 			icon = "◌"
 		}
+		stars := ""
+		if r.Stars > 0 {
+			stars = fmt.Sprintf("(%d)", r.Stars)
+		}
 		desc := r.Description
 		if maxDesc > 3 && len(desc) > maxDesc {
 			desc = desc[:maxDesc-3] + "..."
 		} else if maxDesc <= 3 {
 			desc = ""
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", icon, r.Name, desc)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", icon, r.Name, stars, desc)
 	}
 	tw.Flush()
 }

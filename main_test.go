@@ -300,10 +300,11 @@ func TestResolveUserFromAPI(t *testing.T) {
 
 func TestWriteRepoList(t *testing.T) {
 	repos := []Repo{
-		{Name: "short", Description: "A short description"},
+		{Name: "short", Description: "A short description", Stars: 42},
 		{Name: "longer-name", Description: "Another description"},
 		{Name: "no-desc"},
 		{Name: "forked-repo", Description: "A forked project", Fork: true},
+		{Name: "secret", Description: "A private repo", Private: true},
 	}
 
 	var buf bytes.Buffer
@@ -311,8 +312,8 @@ func TestWriteRepoList(t *testing.T) {
 	out := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 4 {
-		t.Fatalf("got %d lines, want 4", len(lines))
+	if len(lines) != 5 {
+		t.Fatalf("got %d lines, want 5", len(lines))
 	}
 	if !strings.Contains(lines[0], "short") || !strings.Contains(lines[0], "A short description") {
 		t.Errorf("unexpected first line: %q", lines[0])
@@ -324,9 +325,21 @@ func TestWriteRepoList(t *testing.T) {
 	if !strings.Contains(lines[3], "⑂") {
 		t.Errorf("expected fork icon in forked repo line: %q", lines[3])
 	}
-	// Non-fork lines should not have the fork icon
-	if strings.Contains(lines[0], "⑂") {
-		t.Errorf("non-fork line should not have fork icon: %q", lines[0])
+	// Private line should have the private icon
+	if !strings.Contains(lines[4], "◌") {
+		t.Errorf("expected private icon in private repo line: %q", lines[4])
+	}
+	// Starred repo should show star count
+	if !strings.Contains(lines[0], "(42)") {
+		t.Errorf("expected star count (42) in line: %q", lines[0])
+	}
+	// Zero-star repo should not show count
+	if strings.Contains(lines[1], "(0)") {
+		t.Errorf("zero-star repo should not show count: %q", lines[1])
+	}
+	// Public non-fork lines should not have icons
+	if strings.Contains(lines[0], "⑂") || strings.Contains(lines[0], "◌") {
+		t.Errorf("public non-fork line should not have icons: %q", lines[0])
 	}
 }
 
