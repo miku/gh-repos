@@ -259,20 +259,20 @@ func writeRepoList(w io.Writer, repos []Repo, width int) {
 			maxName = len(r.Name)
 		}
 	}
-	// 2 spaces of padding between name and description columns
-	maxDesc := width - maxName - 2
+	// Reserve space for icon column (icon + padding) and name-desc padding
+	maxDesc := width - maxName - 4 // icon col ~2 + 2 padding between name and desc
 	for _, r := range repos {
+		icon := ""
+		if r.Fork {
+			icon = "⑂"
+		}
 		desc := r.Description
 		if maxDesc > 3 && len(desc) > maxDesc {
 			desc = desc[:maxDesc-3] + "..."
 		} else if maxDesc <= 3 {
 			desc = ""
 		}
-		if desc != "" {
-			fmt.Fprintf(tw, "%s\t%s\n", r.Name, desc)
-		} else {
-			fmt.Fprintln(tw, r.Name)
-		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", icon, r.Name, desc)
 	}
 	tw.Flush()
 }

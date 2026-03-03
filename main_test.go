@@ -295,23 +295,30 @@ func TestWriteRepoList(t *testing.T) {
 		{Name: "short", Description: "A short description"},
 		{Name: "longer-name", Description: "Another description"},
 		{Name: "no-desc"},
+		{Name: "forked-repo", Description: "A forked project", Fork: true},
 	}
 
 	var buf bytes.Buffer
 	writeRepoList(&buf, repos, 80)
 	out := buf.String()
 
-	// tabwriter should align columns: longest name is "longer-name" (11 chars) + 2 padding
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("got %d lines, want 3", len(lines))
+	if len(lines) != 4 {
+		t.Fatalf("got %d lines, want 4", len(lines))
 	}
-	// All lines with descriptions should have the same column alignment
 	if !strings.Contains(lines[0], "short") || !strings.Contains(lines[0], "A short description") {
 		t.Errorf("unexpected first line: %q", lines[0])
 	}
 	if !strings.Contains(lines[2], "no-desc") {
 		t.Errorf("unexpected third line: %q", lines[2])
+	}
+	// Fork line should have the fork icon
+	if !strings.Contains(lines[3], "⑂") {
+		t.Errorf("expected fork icon in forked repo line: %q", lines[3])
+	}
+	// Non-fork lines should not have the fork icon
+	if strings.Contains(lines[0], "⑂") {
+		t.Errorf("non-fork line should not have fork icon: %q", lines[0])
 	}
 }
 
