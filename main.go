@@ -34,6 +34,11 @@ const (
 	defaultCacheTTL = 1 * time.Hour
 	cacheFileName   = "gh-repos-cache.json"
 	githubAPIBase   = "https://api.github.com"
+
+	ansiDim    = "\033[2m"
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiReset  = "\033[0m"
 )
 
 // Repo represents a GitHub repository.
@@ -233,19 +238,40 @@ func isDirty(dir string) bool {
 	return len(strings.TrimSpace(string(out))) > 0
 }
 
+// dimWriter wraps an io.Writer, prefixing output with ANSI dim and
+// resetting after each Write so subprocess output appears muted.
+type dimWriter struct {
+	w io.Writer
+}
+
+func (d dimWriter) Write(p []byte) (int, error) {
+	d.w.Write([]byte(ansiDim))
+	n, err := d.w.Write(p)
+	d.w.Write([]byte(ansiReset))
+	return n, err
+}
+
+// gitEnv returns environment variables that prevent git from prompting
+// for credentials interactively.
+func gitEnv() []string {
+	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+}
+
 // gitClone clones a repo into the target directory.
 func gitClone(ctx context.Context, cloneURL, targetDir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, targetDir)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	cmd.Env = gitEnv()
+	cmd.Stdout = dimWriter{os.Stderr}
+	cmd.Stderr = dimWriter{os.Stderr}
 	return cmd.Run()
 }
 
 // gitPull runs git pull in the given directory.
 func gitPull(ctx context.Context, dir string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", dir, "pull", "--ff-only")
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	cmd.Env = gitEnv()
+	cmd.Stdout = dimWriter{os.Stderr}
+	cmd.Stderr = dimWriter{os.Stderr}
 	return cmd.Run()
 }
 
@@ -396,13 +422,13 @@ func cmdSync(args []string) error {
 		if info, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil && info.IsDir() {
 			// Repo exists, try to pull
 			if isDirty(repoDir) {
-				fmt.Fprintf(os.Stderr, "skipping %s: working directory is dirty\n", r.Name)
+				fmt.Fprintf(os.Stderr, "%sskipping %s: working directory is dirty%s\n", ansiYellow, r.Name, ansiReset)
 				skipped++
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "pulling %s ...\n", r.Name)
 			if err := gitPull(ctx, repoDir); err != nil {
-				fmt.Fprintf(os.Stderr, "error pulling %s: %v\n", r.Name, err)
+				fmt.Fprintf(os.Stderr, "%serror pulling %s: %v%s\n", ansiRed, r.Name, err, ansiReset)
 				errors++
 				continue
 			}
@@ -410,8 +436,8 @@ func cmdSync(args []string) error {
 		} else {
 			// Clone
 			fmt.Fprintf(os.Stderr, "cloning %s ...\n", r.Name)
-			if err := gitClone(ctx, r.CloneURL, repoDir); err != nil {
-				fmt.Fprintf(os.Stderr, "error cloning %s: %v\n", r.Name, err)
+			if err := gitClone(ctx, r.SSHURL, repoDir); err != nil {
+				fmt.Fprintf(os.Stderr, "%serror cloning %s: %v%s\n", ansiRed, r.Name, err, ansiReset)
 				errors++
 				continue
 			}
