@@ -109,16 +109,58 @@ func (c *GitHubClient) AuthenticatedUser(ctx context.Context) (string, error) {
 	return user.Login, nil
 }
 
-// ListRepos fetches all repositories for a user, handling pagination.
+// IsOrganization checks whether a GitHub account is an organization.
+func (c *GitHubClient) IsOrganization(ctx context.Context, name string) (bool, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/users/"+name, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("github api error: %d %s", resp.StatusCode, string(body))
+	}
+
+	var account struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&account); err != nil {
+		return false, err
+	}
+	return account.Type == "Organization", nil
+}
+
+// ListRepos fetches all repositories for a user or organization, handling pagination.
 // When owned is true, it uses the authenticated /user/repos endpoint
-// which includes private repositories.
+// which includes private repositories. For organizations, it uses the
+// /orgs endpoint which returns all repos visible to the authenticated user.
 func (c *GitHubClient) ListRepos(ctx context.Context, user string, owned bool) ([]Repo, error) {
 	var allRepos []Repo
 	page := 1
+
+	isOrg := false
+	if !owned {
+		var err error
+		isOrg, err = c.IsOrganization(ctx, user)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine account type: %w", err)
+		}
+	}
+
 	for {
 		var url string
 		if owned {
 			url = fmt.Sprintf("%s/user/repos?per_page=100&page=%d&sort=pushed&affiliation=owner", c.BaseURL, page)
+		} else if isOrg {
+			url = fmt.Sprintf("%s/orgs/%s/repos?per_page=100&page=%d&sort=pushed&type=all", c.BaseURL, user, page)
 		} else {
 			url = fmt.Sprintf("%s/users/%s/repos?per_page=100&page=%d&sort=pushed", c.BaseURL, user, page)
 		}

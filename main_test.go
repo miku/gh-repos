@@ -58,6 +58,14 @@ func setupTestServer(t *testing.T, repos []Repo) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]string{"login": "testuser"})
 	})
 
+	mux.HandleFunc("/users/testuser", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"login": "testuser", "type": "User"})
+	})
+
 	repoHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -259,6 +267,45 @@ func TestGetReposForceBypassesCache(t *testing.T) {
 	}
 	if len(repos) != 1 || repos[0].Name != "from-server" {
 		t.Errorf("expected server repo, got %v", repos)
+	}
+}
+
+func TestListReposOrganization(t *testing.T) {
+	orgRepos := []Repo{
+		{Name: "org-public", FullName: "myorg/org-public", Private: false},
+		{Name: "org-private", FullName: "myorg/org-private", Private: true},
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users/myorg", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"login": "myorg", "type": "Organization"})
+	})
+	mux.HandleFunc("/orgs/myorg/repos", func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		if page == "" || page == "1" {
+			json.NewEncoder(w).Encode(orgRepos)
+		} else {
+			json.NewEncoder(w).Encode([]Repo{})
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := &GitHubClient{
+		Token:      "test-token",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+	}
+
+	repos, err := client.ListRepos(context.Background(), "myorg", false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("got %d repos, want 2", len(repos))
+	}
+	if repos[1].Name != "org-private" || !repos[1].Private {
+		t.Errorf("expected private org repo, got %+v", repos[1])
 	}
 }
 
