@@ -317,6 +317,22 @@ func gitPull(ctx context.Context, dir string) error {
 	return cmd.Run()
 }
 
+// isEmptyRepo reports whether dir is a local clone with no commits whose
+// origin also has no refs. Pulling such a repo is a no-op that git treats
+// as an error; callers should skip it.
+func isEmptyRepo(ctx context.Context, dir string) bool {
+	if exec.Command("git", "-C", dir, "rev-parse", "--verify", "HEAD").Run() == nil {
+		return false
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "ls-remote", "--heads", "origin")
+	cmd.Env = gitEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) == 0
+}
+
 // termWidth returns the width of the terminal, defaulting to 80.
 // When stdout is piped (e.g. into less), it falls back to stderr or
 // the COLUMNS environment variable to preserve the original width.
@@ -451,6 +467,7 @@ func cmdSync(args []string) error {
 	var (
 		cloned  int
 		pulled  int
+		empty   int
 		skipped int
 		errors  int
 	)
@@ -466,6 +483,11 @@ func cmdSync(args []string) error {
 			if isDirty(repoDir) {
 				fmt.Fprintf(os.Stderr, "%sskipping %s: working directory is dirty%s\n", ansiYellow, r.Name, ansiReset)
 				skipped++
+				continue
+			}
+			if isEmptyRepo(ctx, repoDir) {
+				fmt.Fprintf(os.Stderr, "%s%s is empty, nothing to pull%s\n", ansiDim, r.Name, ansiReset)
+				empty++
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "pulling %s ...\n", r.Name)
@@ -487,8 +509,8 @@ func cmdSync(args []string) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\ndone: %d cloned, %d pulled, %d skipped (dirty), %d errors\n",
-		cloned, pulled, skipped, errors)
+	fmt.Fprintf(os.Stderr, "\ndone: %d cloned, %d pulled, %d empty, %d skipped (dirty), %d errors\n",
+		cloned, pulled, empty, skipped, errors)
 	return nil
 }
 
